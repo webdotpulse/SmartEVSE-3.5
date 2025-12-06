@@ -29,6 +29,7 @@
 #ifdef SMARTEVSE_VERSION //ESP32
 #include "ModbusServerRTU.h"
 #include "ModbusClientRTU.h"
+#include "ModbusServerTCPasync.h"
 #endif
 
 struct ModBus {
@@ -51,6 +52,7 @@ struct ModBus {
 // definition of MBserver / MBclient class is done in evse.cpp
 extern ModbusServerRTU MBserver;
 extern ModbusClientRTU MBclient; 
+extern ModbusServerTCPasync MBserverTCP;
 #endif
 
 void ModbusReadInputRequest(uint8_t address, uint8_t function, uint16_t reg, uint16_t quantity);

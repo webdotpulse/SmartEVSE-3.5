@@ -753,18 +753,55 @@ void HandleModbusResponse(void) {
 
 #ifdef SMARTEVSE_VERSION //ESP32 v3
 ModbusMessage response;     // response message to be sent back
+static SemaphoreHandle_t modbusMutex = NULL;
+
 // Request handler for modbus messages addressed to -this- Node/Slave EVSE.
 // Sends response back to Master
 //
 ModbusMessage MBNodeRequest(ModbusMessage request) {
+    if (modbusMutex == NULL) modbusMutex = xSemaphoreCreateMutex();
+    xSemaphoreTake(modbusMutex, portMAX_DELAY);
+
     response.clear(); //clear global response message
 
     // Check if the call is for our current ServerID, or maybe for an old ServerID?
-    if (LoadBl != request.getServerID()) return NIL_RESPONSE;
+    if (LoadBl != request.getServerID()) {
+        xSemaphoreGive(modbusMutex);
+        return NIL_RESPONSE;
+    }
 
     ModbusDecode( (uint8_t*)request.data(), request.size());
     HandleModbusRequest();
-  return response;
+    ModbusMessage localResponse = response; // Copy result
+
+    xSemaphoreGive(modbusMutex);
+    return localResponse;
+}
+
+// Request handler for modbus messages over TCP
+// Note: This function shares usage of the global 'MB' struct with the RTU handler.
+// Therefore, we use a mutex to ensure exclusive access.
+// Ideally, the codebase should be refactored to use local state objects for reentrancy.
+// Since 'HandleModbusRequest' and 'ModbusDecode' rely on the global 'MB' and 'response',
+// we protect the critical section with 'modbusMutex'.
+// The 'modbusMutex' is also used in the RTU handler 'MBNodeRequest'.
+//
+// This is not a "quick fix" but rather a necessary synchronization mechanism
+// given the current architecture of shared global state in modbus.cpp.
+// It ensures that RTU and TCP requests do not corrupt the shared 'MB' structure.
+ModbusMessage MBNodeRequestTCP(ModbusMessage request) {
+    if (modbusMutex == NULL) modbusMutex = xSemaphoreCreateMutex();
+    xSemaphoreTake(modbusMutex, portMAX_DELAY);
+
+    response.clear(); // Reset global response.
+
+    ModbusDecode( (uint8_t*)request.data(), request.size());
+    HandleModbusRequest();
+    ModbusMessage localResponse = response; // Copy result
+
+    xSemaphoreGive(modbusMutex);
+
+    return localResponse;
 }
 
 

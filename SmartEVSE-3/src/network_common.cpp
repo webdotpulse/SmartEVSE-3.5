@@ -37,18 +37,6 @@ struct mg_mgr mgr;  // Mongoose event manager. Holds all connections
 String APhostname = "SmartEVSE-" + String( MacId() & 0xffff, 10);           // SmartEVSE access point Name = SmartEVSE-xxxxx
 String APpassword = "00000000";
 
-#if MQTT
-// MQTT connection info
-String MQTTuser;
-String MQTTpassword;
-String MQTTprefix;
-String MQTTHost = "";
-uint16_t MQTTPort;
-mg_timer *MQTTtimer;
-uint8_t lastMqttUpdate = 0;
-bool MQTTtls = false;
-#endif
-
 mg_connection *HttpListener80, *HttpListener443;
 
 bool shouldReboot = false;
@@ -72,131 +60,6 @@ char *downloadUrl = NULL;
 int downloadProgress = 0;
 int downloadSize = 0;
 
-#if MQTT
-#if MQTT_ESP == 1
-/*
- * @brief Event handler registered to receive MQTT events
- *
- *  This function is called by the MQTT client event loop.
- *
- * @param handler_args user data registered to the event.
- * @param base Event base for the handler(always MQTT Base in this example).
- * @param event_id The id for the received event.
- * @param event_data The data for the event, esp_mqtt_event_handle_t.
- */
-void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, esp_mqtt_event_t *event) {
-    switch ((esp_mqtt_event_id_t)event_id) {
-    case MQTT_EVENT_CONNECTED:
-        MQTTclient.connected = true;
-        SetupMQTTClient();
-        break;
-    case MQTT_EVENT_DISCONNECTED:
-        MQTTclient.connected = false;
-        break;
-    case MQTT_EVENT_DATA:
-        {
-        String topic2 = String(event->topic).substring(0,event->topic_len);
-        String payload2 = String(event->data).substring(0,event->data_len);
-        //_LOG_A("Received MQTT EVENT DATA: topic=%s, payload=%s.\n", topic2.c_str(), payload2.c_str());
-        mqtt_receive_callback(topic2, payload2);
-        }
-        break;
-    case MQTT_EVENT_ERROR:
-        _LOG_I("MQTT_EVENT_ERROR; Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
-        break;
-    default:
-        break;
-    }
-}
-
-
-void MQTTclient_t::connect(void) {
-    if (MQTTHost != "") {
-        char s_mqtt_url[80];
-        const char* scheme = MQTTtls ? "mqtts" : "mqtt";
-        snprintf(s_mqtt_url, sizeof(s_mqtt_url), "%s://%s:%i", scheme, MQTTHost.c_str(), MQTTPort);
-        String lwtTopic = MQTTprefix + "/connected";
-        esp_mqtt_client_config_t mqtt_cfg = { .uri = s_mqtt_url, .client_id=MQTTprefix.c_str(), .username=MQTTuser.c_str(), .password=MQTTpassword.c_str(), .lwt_topic=lwtTopic.c_str(), .lwt_msg="offline", .lwt_qos=0, .lwt_retain=1, .lwt_msg_len=7, .keepalive=15 };
-        
-        static String ca_cert_str;
-        if (MQTTtls) {
-            ca_cert_str = readMqttCaCert();
-            if (ca_cert_str.length() > 0) {
-                mqtt_cfg.cert_pem = ca_cert_str.c_str();
-                _LOG_D("Using CA cert from LittleFS (%d bytes).\n", ca_cert_str.length());
-            } else {
-                mqtt_cfg.cert_pem = NULL;
-                _LOG_A("No CA cert in LittleFS.\n");
-            }    
-        }
-
-        MQTTclient.client = esp_mqtt_client_init(&mqtt_cfg);
-        /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
-        esp_mqtt_client_register_event(MQTTclient.client, (esp_mqtt_event_id_t) ESP_EVENT_ANY_ID, (esp_event_handler_t) mqtt_event_handler, NULL);
-        if (WiFi.status() == WL_CONNECTED)
-            esp_mqtt_client_start(MQTTclient.client);
-    }
-}
-#endif
-
-
-//wrapper so MQTTClient::Publish works
-void MQTTclient_t::publish(const String &topic, const String &payload, bool retained, int qos) {
-#if MQTT_ESP == 0
-    if (s_conn && connected) {
-        struct mg_mqtt_opts opts = default_opts;
-        opts.topic = mg_str(topic.c_str());
-        opts.message = mg_str(payload.c_str());
-        opts.qos = qos;
-        opts.retain = retained;
-        mg_mqtt_pub(s_conn, &opts);
-    }
-#else
-    //esp_mqtt_client_enqueue(client, topic.c_str(), payload.c_str(), payload.length(), qos, retained, 1);
-    if (connected)
-        esp_mqtt_client_publish(client, topic.c_str(), payload.c_str(), payload.length(), qos, retained);
-#endif
-}
-
-void MQTTclient_t::subscribe(const String &topic, int qos) {
-#if MQTT_ESP == 0
-    if (s_conn && connected) {
-        struct mg_mqtt_opts opts = default_opts;
-        opts.topic = mg_str(topic.c_str());
-        opts.qos = qos;
-        mg_mqtt_sub(s_conn, &opts);
-    }
-#else
-    if (connected)
-        esp_mqtt_client_subscribe(client, topic.c_str(), qos);
-#endif
-}
-
-
-void MQTTclient_t::announce(const String& entity_name, const String& domain, const String& optional_payload) {
-    String entity_suffix = entity_name;
-    entity_suffix.replace(" ", "");
-    String topic = "homeassistant/" + domain + "/" + MQTTprefix + "-" + entity_suffix + "/config";
-
-    const String config_url = "http://" + WiFi.localIP().toString();
-    const String device_payload = String(R"("device": {)") + jsn("model","SmartEVSE v3") + jsna("identifiers", MQTTprefix) + jsna("name", MQTTprefix) + jsna("manufacturer","Stegen") + jsna("configuration_url", config_url) + jsna("sw_version", String(VERSION)) + "}";
-
-    String payload = "{"
-        + jsn("name", entity_name)
-        + jsna("object_id", String(MQTTprefix + "-" + entity_suffix))  // Deprecated for HA 2026.4 - still setting for backwards compatibility. Will not raise error if new default_entity_id is also set: https://github.com/home-assistant/core/pull/151996
-        + jsna("default_entity_id", String(MQTTprefix + "-" + entity_suffix))  // HA 2025.10 and up: https://github.com/home-assistant/core/pull/151775
-        + jsna("unique_id", String(MQTTprefix + "-" + entity_suffix))
-        + jsna("state_topic", String(MQTTprefix + "/" + entity_suffix))
-        + jsna("availability_topic", String(MQTTprefix + "/connected"))
-        + ", " + device_payload + optional_payload
-        + "}";
-
-    MQTTclient.publish(topic.c_str(), payload.c_str(), true, 0);  // Retain + QoS 0
-}
-
-MQTTclient_t MQTTclient;
-
-#endif
 
 //github.com L1
     const char* root_ca_github = R"ROOT_CA(
@@ -865,67 +728,6 @@ const String& webServerRequest::value() {
 
 struct mg_str empty = mg_str_n("", 0UL);
 
-#if MQTT && MQTT_ESP == 0
-char s_mqtt_url[80];
-//TODO perhaps integrate multiple fn callback functions?
-static void fn_mqtt(struct mg_connection *c, int ev, void *ev_data) {
-    if (ev == MG_EV_OPEN) {
-        _LOG_V("%lu CREATED\n", c->id);
-        // c->is_hexdumping = 1;
-    } else if (ev == MG_EV_ERROR) {
-        // On error, log error message
-        _LOG_A("%lu ERROR %s\n", c->id, (char *) ev_data);
-    } else if (ev == MG_EV_CONNECT) {
-        // If target URL is SSL/TLS, command client connection to use TLS
-        if (mg_url_is_ssl(s_mqtt_url)) {
-            struct mg_tls_opts opts = {.ca = empty, .cert = empty, .key = empty, .name = mg_url_host(s_mqtt_url), .skip_verification = 0};
-            //struct mg_tls_opts opts = {.ca = empty};
-            mg_tls_init(c, &opts);
-        }
-    } else if (ev == MG_EV_MQTT_OPEN) {
-        // MQTT connect is successful
-        _LOG_V("%lu CONNECTED to %s\n", c->id, s_mqtt_url);
-        MQTTclient.connected = true;
-        SetupMQTTClient();
-    } else if (ev == MG_EV_MQTT_MSG) {
-        // When we get echo response, print it
-        struct mg_mqtt_message *mm = (struct mg_mqtt_message *) ev_data;
-        _LOG_V("%lu RECEIVED %.*s <- %.*s\n", c->id, (int) mm->data.len, mm->data.buf, (int) mm->topic.len, mm->topic.buf);
-        //somehow topic is not null terminated
-        String topic2 = String(mm->topic.buf).substring(0,mm->topic.len);
-        mqtt_receive_callback(topic2, mm->data.buf);
-    } else if (ev == MG_EV_CLOSE) {
-        _LOG_V("%lu CLOSED\n", c->id);
-        MQTTclient.connected = false;
-        MQTTclient.s_conn = NULL;  // Mark that we're closed
-    }
-}
-
-// Timer function - recreate client connection if it is closed
-static void timer_fn(void *arg) {
-    struct mg_mgr *mgr = (struct mg_mgr *) arg;
-    struct mg_mqtt_opts opts;
-    memset(&opts, 0, sizeof(opts));
-    opts.clean = false;
-    // set will topic
-    String temp = MQTTprefix + "/connected";
-    opts.topic = mg_str(temp.c_str());
-    opts.message = mg_str("offline");
-    opts.retain = true;
-    opts.keepalive = 15;                                                          // so we will timeout after 15s
-    opts.version = 4;
-    opts.client_id=mg_str(MQTTprefix.c_str());
-    opts.user=mg_str(MQTTuser.c_str());
-    opts.pass=mg_str(MQTTpassword.c_str());
-
-    //prepare MQTT url
-    //mqtt[s]://[username][:password]@host.domain[:port]
-    snprintf(s_mqtt_url, sizeof(s_mqtt_url), "mqtt://%s:%i", MQTTHost.c_str(), MQTTPort);
-
-    if (MQTTclient.s_conn == NULL) MQTTclient.s_conn = mg_mqtt_connect(mgr, s_mqtt_url, &opts, fn_mqtt, NULL);
-}
-#endif
-
 
 // HTML web form for entering WIFI credentials in AP setup portal
 static const char *html_form = R"EOF(
@@ -1207,78 +1009,12 @@ static void fn_http_server(struct mg_connection *c, int ev, void *ev_data) {
 #endif
         } else if (mg_http_match_uri(hm, "/settings") && !memcmp("POST", hm->method.buf, hm->method.len)) {
             DynamicJsonDocument doc(64);
-#if MQTT
-            if (request->hasParam("mqtt_update") && request->getParam("mqtt_update")->value().toInt() == 1) {
-
-                if(request->hasParam("mqtt_host")) {
-                    MQTTHost = request->getParam("mqtt_host")->value();
-                    doc["mqtt_host"] = MQTTHost;
-                }
-
-                if(request->hasParam("mqtt_port")) {
-                    MQTTPort = request->getParam("mqtt_port")->value().toInt();
-                    if (MQTTPort == 0) MQTTPort = 1883;
-                    doc["mqtt_port"] = MQTTPort;
-                }
-
-                if(request->hasParam("mqtt_topic_prefix")) {
-                    MQTTprefix = request->getParam("mqtt_topic_prefix")->value();
-                    if (!MQTTprefix || MQTTprefix == "") {
-                        MQTTprefix = APhostname;
-                    }
-                    doc["mqtt_topic_prefix"] = MQTTprefix;
-                }
-
-                if(request->hasParam("mqtt_username")) {
-                    MQTTuser = request->getParam("mqtt_username")->value();
-                    if (!MQTTuser || MQTTuser == "") {
-                        MQTTuser.clear();
-                    }
-                    doc["mqtt_username"] = MQTTuser;
-                }
-
-                if(request->hasParam("mqtt_password")) {
-                    MQTTpassword = request->getParam("mqtt_password")->value();
-                    if (!MQTTpassword || MQTTpassword == "") {
-                        MQTTpassword.clear();
-                    }
-                    doc["mqtt_password_set"] = (MQTTpassword != "");
-                }
-
-                if (request->hasParam("mqtt_tls")) {
-                    MQTTtls = request->getParam("mqtt_tls")->value() == "1";
-                    doc["mqtt_tls"] = MQTTtls;
-                }
-
-                if(request->hasParam("mqtt_ca_cert")) {
-                    String cert = request->getParam("mqtt_ca_cert")->value();
-                    writeMqttCaCert(cert);                      // Save to LittleFS
-                    doc["mqtt_ca_cert_set"] = !cert.isEmpty();
-                }
-
-                // disconnect mqtt so it will automatically reconnect with then new params
-                MQTTclient.disconnect();
-#if MQTT_ESP == 1
-                MQTTclient.connect();
-#endif
-
-                if (preferences.begin("settings", false) ) {
-                    preferences.putString("MQTTpassword", MQTTpassword);
-                    preferences.putString("MQTTuser", MQTTuser);
-                    preferences.putString("MQTTprefix", MQTTprefix);
-                    preferences.putString("MQTTHost", MQTTHost);
-                    preferences.putUShort("MQTTPort", MQTTPort);
-                    preferences.putBool("MQTTtls", MQTTtls);
-                    preferences.end();
-                }
-            }
-#endif
             String json;
             serializeJson(doc, json);
             mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s\r\n", json.c_str());    // Yes. Respond JSON
         } else if (mg_http_match_uri(hm, "/mqtt_ca_cert") && !memcmp("GET", hm->method.buf, hm->method.len)) {
-            String cert = readMqttCaCert();
-            mg_http_reply(c, 200, "Content-Type: text/plain\r\n", "%s\r\n", cert.c_str());
+            // Deprecated
+            mg_http_reply(c, 404, "", "");
         } else {                                                                    // if everything else fails, serve static page
             // Cache ".webp" or ".ico" image files for one year without revalidation or server checks.
             if (mg_match(hm->uri, mg_str("#.webp"), NULL) ||
@@ -1354,16 +1090,6 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
         case WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED:
             _LOG_A("Connected or reconnected to WiFi\n");
 
-#if MQTT
-#if MQTT_ESP == 0
-            if (!MQTTtimer) {
-               MQTTtimer = mg_timer_add(&mgr, 3000, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, timer_fn, &mgr);
-            }
-#else
-            if (MQTTHost != "")
-                esp_mqtt_client_start(MQTTclient.client);
-#endif
-#endif //MQTT
             mg_log_set(MG_LL_NONE);
             //mg_log_set(MG_LL_VERBOSE);
 
@@ -1385,9 +1111,6 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
             break;
         case WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             if (WIFImode == 1) {
-#if MQTT
-                //mg_timer_free(&mgr);
-#endif
                 WiFi.reconnect();                                               // recommended reconnection strategy by ESP-IDF manual
             }
             break;
@@ -1513,26 +1236,10 @@ void WiFiSetup(void) {
             setenv("TZ",TZinfo.c_str(),1);
             tzset();
         }
-#if MQTT
-        MQTTpassword = preferences.getString("MQTTpassword");
-        MQTTuser = preferences.getString("MQTTuser");
-#ifdef SENSORBOX_VERSION
-        MQTTprefix = preferences.getString("MQTTprefix", "Sensorbox/" + String(serialnr));
-#else
-        MQTTprefix = preferences.getString("MQTTprefix", "SmartEVSE/" + String(serialnr));
-#endif
-        MQTTHost = preferences.getString("MQTTHost", "");
-        MQTTPort = preferences.getUShort("MQTTPort", 1883);
-        MQTTtls = preferences.getBool("MQTTtls", false);
-#endif //MQTT
         preferences.end();
     }
 
     handleWIFImode();                                                           //go into the mode that was saved in nonvolatile memory
-
-#if MQTT && MQTT_ESP
-    MQTTclient.connect();
-#endif
 
 }
 
@@ -1540,7 +1247,6 @@ void WiFiSetup(void) {
 // called by loop() in the main program
 void network_loop() {
     static unsigned long lastCheck_net = 0;
-    static int seconds = 0;
     time_t now;
     if (millis() - lastCheck_net >= 1000) {
         lastCheck_net = millis();
@@ -1550,14 +1256,6 @@ void network_loop() {
         if (!LocalTimeSet && WIFImode == 1) {
             _LOG_A("Time not synced with NTP yet.\n");
         }
-        //this block is for non-time critical stuff that needs to run approx 1 / 10 seconds
-#if MQTT
-        if (seconds++ >= 9) {
-            seconds = 0;
-            MQTTclient.publish(MQTTprefix + "/ESPUptime", esp_timer_get_time() / 1000000, false, 0);
-            MQTTclient.publish(MQTTprefix + "/WiFiRSSI", String(WiFi.RSSI()), false, 0);
-        }
-#endif
     }
 
     mg_mgr_poll(&mgr, 100);                                                     // TODO increase this parameter to up to 1000 to make loop() less greedy

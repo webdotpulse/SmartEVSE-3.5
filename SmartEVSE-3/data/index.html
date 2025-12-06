@@ -141,14 +141,7 @@
                 .attr('title', (time_until_full > 0 ? Math.round(time_until_full / 60) + ' min to go' : 'N/A'));
             }
 
-            if (data.mqtt) {
-              $('#mqtt').text((data.mqtt.status) || 'N/A').show();
-              $('#mqtt_config').show();
-            } else {
-              $('#mqtt').text('').hide();
-              $('.config').hide();
-              $('#mqtt_config').hide();
-            }
+            // MQTT removed
 
             if(data.evse.loadbl > 1) {
               $('[id=loadbl]').show();
@@ -234,8 +227,6 @@
             else {
                 $('#repeat').text("none");
             }
-            $('#battery_current').text((data.home_battery.current/10).toFixed(1) + " A");
-
             $('#phase_total').text((data.phase_currents.TOTAL/10).toFixed(1) + " A");
             $('#phase_1').text((data.phase_currents.L1/10).toFixed(1) + " A");
             $('#phase_2').text((data.phase_currents.L2/10).toFixed(1) + " A");
@@ -261,17 +252,7 @@
               $('[id=with_p1_api_data_time]').hide();
             }
 
-            if(data.home_battery.last_update == 0) {
-              $('[id=with_homebattery]').hide();
-            } else {
-              $('[id=with_homebattery]').show();
-            }
-
-            if(data.home_battery.current == 0) {
-              $('#battery_status').text("Idle");
-            } else {
-              $('#battery_status').text(data.home_battery.current < 0 ? "Discharging" : "Charging");
-            }
+            // Home Battery removed
 
             if(data.settings.mains_meter === "Disabled") {
               $('.with_mainsmeter').hide();
@@ -299,16 +280,7 @@
               $('.with_modem').hide();
             }
 
-            if (data.mqtt && !mqttEditMode) {
-                $('#mqtt_host').val(data.mqtt.host);
-                $('#mqtt_port').val(data.mqtt.port);
-                $('#mqtt_username').val(data.mqtt.username);
-                $('#mqtt_password').val(data.mqtt.password);
-                $('#mqtt_topic_prefix').val(data.mqtt.topic_prefix);
-                $('#mqtt_tls').prop('checked', data.mqtt.tls).checkboxradio("refresh");  // Set and refresh widget
-                $('#mqtt_ca_cert').val(data.mqtt.ca_cert || '');
-                toggleCertVisibility();
-            }
+            // MQTT removed
 
             if (data.settings.lcdlock == 1) {
               document.getElementById("lcdlock").checked = true;
@@ -484,14 +456,6 @@
                                               <div class="h5 mb-0 mr-3 text-gray-800" id="temp"></div>
                                             </div>
                                         </div>
-                                        <div class="row no-gutters align-items-center">
-                                          <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 140px;">
-                                              MQTT:
-                                          </div>
-                                          <div class="col">
-                                              <div class="h5 mb-0 mr-3 text-gray-800" id="mqtt"></div>
-                                          </div>
-                                      </div>
                                         <div class="row no-gutters align-items-center" id="contactor2">
                                           <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 140px;">
                                               Contactor 2:
@@ -1002,56 +966,6 @@
                 </div>
               </div>
 
-              <div class="col-xl-4 col-md-6 mb-4" id="with_homebattery" style="display: none;">
-                <div class="card border-left-warning shadow h-100 py-2">
-                    <div class="card-body">
-                        <div class="row no-gutters align-items-center">
-                            <div class="col mr-2">
-                                <div class="text-xl font-weight-bold text-info text-uppercase mb-1">Home Battery</div>
-                                <div class="row no-gutters align-items-center">
-                                  <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 100px;">
-                                      Status:
-                                    </div>
-                                    <div class="col">
-                                      <div class="h5 mb-0 mr-3 text-gray-800" id="battery_status" style="text-align: right;"></div>
-                                    </div>
-                                </div>
-                                <div class="row no-gutters align-items-center">
-                                  <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 100px;">
-                                      Current:
-                                    </div>
-                                    <div class="col">
-                                      <div class="h5 mb-0 mr-3 text-gray-800" id="battery_current" style="text-align: right;"></div>
-                                    </div>
-                                </div>
-                                <div class="row no-gutters align-items-center">
-                                  <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 100px;">
-                                      Date:
-                                    </div>
-                                    <div class="col">
-                                      <div class="h5 mb-0 mr-3 text-gray-800" id="battery_last_update_date" style="text-align: right;"></div>
-                                    </div>
-                                </div>
-                                <div class="row no-gutters align-items-center">
-                                  <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 100px;">
-                                      Time:
-                                    </div>
-                                    <div class="col">
-                                      <div class="h5 mb-0 mr-3 text-gray-800" id="battery_last_update_time" style="text-align: right;"></div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-auto">
-                                <i class="fas fa-clipboard-list fa-2x text-gray-300">
-                                  <svg style="width:48px;height:48px" viewBox="0 0 24 24">
-                                    <path fill="currentColor" d="M16 20H8V6H16M16.67 4H15V2H9V4H7.33C6.6 4 6 4.6 6 5.33V20.67C6 21.4 6.6 22 7.33 22H16.67C17.41 22 18 21.41 18 20.67V5.33C18 4.6 17.4 4 16.67 4M15 16H9V19H15V16M15 7H9V10H15V7M15 11.5H9V14.5H15V11.5Z" />
-                                </svg>
-                                </i>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-              </div>
             </div>
             <!-- END ROW -->
               <div class="row">
@@ -1368,37 +1282,6 @@
                                           <button onclick="postRequiredEVCCID()" style="width: 120px; display:inline-block;">Update</button>
                                         </form>
                                       </div>
-                                    </div>
-                                  </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                  <div style="margin-bottom: 20px;" class="config">
-                      <div class="card border-left-primary shadow h-100 py-2">
-                        <div class="card-body">
-                            <div class="row no-gutters align-items-center">
-                                <div class="col mr-2">
-                                    <div class="text font-weight-bold text-primary text-uppercase mb-1">Config</div>
-                                    <div class="row no-gutters align-items-center" id="mqtt_config">
-                                        <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 120px;">
-                                            MQTT:
-                                        </div>
-                                        <div class="col">
-                                            <button onclick="toggleMqttEdit()" style="display:inline-block;" id="edit_mqtt_button">Edit Settings</button>
-                                            <div class="mqtt_settings" style="display:none">
-                                                <label>Host: <input id="mqtt_host" title="Leave empty to disable MQTT"></label>
-                                                <label>Port: <input id="mqtt_port" title="Usually 1883 for MQTT, and 8883 for secure MQTTS"></label>
-                                                <label>Username: <input id="mqtt_username" title="Leave empty for anonymous MQTT"></label>
-                                                <label>Password: <input id="mqtt_password" title="Leave empty for anonymous MQTT"></label>
-                                                <label>Topic Prefix: <input id="mqtt_topic_prefix"></label>
-                                                <label>Enable TLS: <input type="checkbox" id="mqtt_tls" value="1"></label>
-                                                <div id="mqtt_ca_cert_wrapper" style="display:none;">
-                                                    <label>CA Certificate (PEM): <textarea id="mqtt_ca_cert" rows="10" style="width:100%; font-family:monospace;" title="Paste the PEM-formatted CA certificate here for TLS."></textarea></label>
-                                                </div>
-                                                <button onclick="configureMqtt()" style="display:inline-block;">Save</button>
-                                            </div>
-                                        </div>
                                     </div>
                                   </div>
                                 </div>

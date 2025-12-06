@@ -1885,6 +1885,7 @@ static struct mg_str s_known_types[] = {
     MG_C_STR("tgz"), MG_C_STR("application/tar-gz"),
     MG_C_STR("wav"), MG_C_STR("audio/wav"),
     MG_C_STR("webp"), MG_C_STR("image/webp"),
+    MG_C_STR("avif"), MG_C_STR("image/avif"),
     MG_C_STR("zip"), MG_C_STR("application/zip"),
     MG_C_STR("3gp"), MG_C_STR("video/3gpp"),
     {0, 0},

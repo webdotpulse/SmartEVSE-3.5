@@ -35,6 +35,7 @@ char RequiredEVCCID[32] = "";                                               // R
 #include <Logging.h>
 #include <ModbusServerRTU.h>        // Slave/node
 #include <ModbusClientRTU.h>        // Master
+#include <ModbusServerTCPasync.h>   // TCP Slave
 #include <time.h>
 
 #include <soc/sens_reg.h>
@@ -119,9 +120,11 @@ extern void SendConfigToCH32(void);
 // Create a ModbusRTU server, client and bridge instance on Serial1
 ModbusServerRTU MBserver(2000, PIN_RS485_DIR);     // TCP timeout set to 2000 ms
 ModbusClientRTU MBclient(PIN_RS485_DIR);
+ModbusServerTCPasync MBserverTCP;
 static esp_adc_cal_characteristics_t * adc_chars_PP;
 static esp_adc_cal_characteristics_t * adc_chars_Temperature;
 extern ModbusMessage MBEVMeterResponse(ModbusMessage request);
+extern ModbusMessage MBNodeRequestTCP(ModbusMessage request);
 #endif //SMARTEVSE_VERSION
 
 hw_timer_t * timerA = NULL;
@@ -227,8 +230,6 @@ extern char str[20];
 extern int phasesLastUpdate;
 extern bool phasesLastUpdateFlag;
 extern int16_t IrmsOriginal[3];
-extern int homeBatteryCurrent;
-extern int homeBatteryLastUpdate;
 // set by EXTERNAL logic through MQTT/REST to indicate cheap tariffs ahead until unix time indicated
 extern uint8_t ColorOff[3] ;
 extern uint8_t ColorNormal[3] ;
@@ -515,219 +516,6 @@ void writeMqttCaCert(const String& cert) {
     _LOG_D("Wrote %d bytes to /mqtt_ca.pem.\n", cert.length());
 }
 
-#if MQTT
-void mqtt_receive_callback(const String topic, const String payload) {
-    if (topic == MQTTprefix + "/Set/Mode") {
-        if (payload == "Off") {
-#if SMARTEVSE_VERSION >=40 //v4            
-            Serial1.printf("@ResetModemTimers\n");
-#endif            
-            setAccess(OFF);
-        } else if (payload == "Normal") {
-            setMode(MODE_NORMAL);
-        } else if (payload == "Solar") {
-            setOverrideCurrent(0);
-            setMode(MODE_SOLAR);
-        } else if (payload == "Smart") {
-            setOverrideCurrent(0);
-            setMode(MODE_SMART);
-        } else if (payload == "Pause") {
-            setAccess(PAUSE);
-        }
-    } else if (topic == MQTTprefix + "/Set/CustomButton") {
-        if (payload == "On") {
-            CustomButton = true;
-        } else {
-            CustomButton = false;
-        }
-    } else if (topic == MQTTprefix + "/Set/CurrentOverride") {
-        uint16_t RequestedCurrent = payload.toInt();
-        if (RequestedCurrent == 0) {
-            setOverrideCurrent(0);
-        } else if (LoadBl < 2 && (Mode == MODE_NORMAL || Mode == MODE_SMART)) { // OverrideCurrent not possible on Slave
-            if (RequestedCurrent >= (MinCurrent * 10) && RequestedCurrent <= (MaxCurrent * 10)) {
-                setOverrideCurrent(RequestedCurrent);
-            }
-        }
-    } else if (topic == MQTTprefix + "/Set/CurrentMaxSumMains" && LoadBl < 2) {
-        uint16_t RequestedCurrent = payload.toInt();
-        if (RequestedCurrent == 0) {
-            MaxSumMains = 0;
-        } else if (RequestedCurrent == 0 || (RequestedCurrent >= 10 && RequestedCurrent <= 600)) {
-                MaxSumMains = RequestedCurrent;
-        }
-    } else if (topic == MQTTprefix + "/Set/CPPWMOverride") {
-        int pwm = payload.toInt();
-        if (pwm == -1) {
-            SetCPDuty(1024);
-            PILOT_CONNECTED;
-            CPDutyOverride = false;
-        } else if (pwm == 0) {
-            SetCPDuty(0);
-            PILOT_DISCONNECTED;
-            CPDutyOverride = true;
-        } else if (pwm <= 1024) {
-            SetCPDuty(pwm);
-            PILOT_CONNECTED;
-            CPDutyOverride = true;
-        }
-    } else if (topic == MQTTprefix + "/Set/MainsMeter") {
-        if (MainsMeter.Type != EM_API || LoadBl >= 2)
-            return;
-
-        int32_t L1, L2, L3;
-        int n = sscanf(payload.c_str(), "%d:%d:%d", &L1, &L2, &L3);
-
-        // MainsMeter can measure -200A to +200A per phase
-        if (n == 3 && (L1 > -2000 && L1 < 2000) && (L2 > -2000 && L2 < 2000) && (L3 > -2000 && L3 < 2000)) {
-#if SMARTEVSE_VERSION < 40 //v3
-            if (LoadBl < 2) {
-                MainsMeter.setTimeout(COMM_TIMEOUT);
-                MainsMeter.Irms[0] = L1;
-                MainsMeter.Irms[1] = L2;
-                MainsMeter.Irms[2] = L3;
-                CalcIsum();
-            }
-#else //v4
-            Serial1.printf("@Irms:%03u,%d,%d,%d\n", MainsMeter.Address, L1, L2, L3); //Irms:011,312,123,124 means: the meter on address 11(dec) has Irms[0] 312 dA, Irms[1] of 123 dA, Irms[2] of 124 dA
-#endif
-        }
-    } else if (topic == MQTTprefix + "/Set/EVMeter") {
-        if (EVMeter.Type != EM_API)
-            return;
-
-        int32_t L1, L2, L3, W, WH;
-        int n = sscanf(payload.c_str(), "%d:%d:%d:%d:%d", &L1, &L2, &L3, &W, &WH);
-
-        // We expect 5 values (and accept -1 for unknown values)
-        if (n == 5) {
-            if ((L1 > -1 && L1 < 1000) && (L2 > -1 && L2 < 1000) && (L3 > -1 && L3 < 1000)) {
-#if SMARTEVSE_VERSION < 40 //v3
-                // RMS currents
-                EVMeter.Irms[0] = L1;
-                EVMeter.Irms[1] = L2;
-                EVMeter.Irms[2] = L3;
-                EVMeter.CalcImeasured();
-                EVMeter.Timeout = COMM_EVTIMEOUT;
-#else //v4
-                Serial1.printf("@Irms:%03u,%d,%d,%d\n", EVMeter.Address, L1, L2, L3); //Irms:011,312,123,124 means: the meter on address 11(dec) has Irms[0] 312 dA, Irms[1] of 123 dA, Irms[2] of 124 dA
-#endif
-            }
-
-            if (W > -1) {
-                // Power measurement
-#if SMARTEVSE_VERSION < 40 //v3
-                EVMeter.PowerMeasured = W;
-#else //v4
-                Serial1.printf("@PowerMeasured:%03u,%d\n", EVMeter.Address, W);
-#endif
-            }
-
-            if (WH > -1) {
-                // Energy measurement;  //we dont send the energies to CH32 because they are not used there
-                EVMeter.Import_active_energy = WH;
-                EVMeter.Export_active_energy = 0;
-                EVMeter.UpdateEnergies();
-            }
-        }
-    } else if (topic == MQTTprefix + "/Set/HomeBatteryCurrent") {
-        if (LoadBl >= 2)
-            return;
-        homeBatteryCurrent = payload.toInt();
-        homeBatteryLastUpdate = time(NULL);
-#if SMARTEVSE_VERSION >= 40
-        SEND_TO_CH32(homeBatteryCurrent); //we set homeBatteryLastUpdate on CH32 on receipt
-#endif
-#if MODEM
-    } else if (topic == MQTTprefix + "/Set/RequiredEVCCID") {
-        strncpy(RequiredEVCCID, payload.c_str(), sizeof(RequiredEVCCID));
-        Serial1.printf("@RequiredEVCCID:%s\n", RequiredEVCCID);
-        write_settings();
-#endif
-    } else if (topic == MQTTprefix + "/Set/ColorOff") {
-        int32_t R, G, B;
-        int n = sscanf(payload.c_str(), "%d,%d,%d", &R, &G, &B);
-
-        // R,G,B is between 0..255
-        if (n == 3 && (R >= 0 && R < 256) && (G >= 0 && G < 256) && (B >= 0 && B < 256)) {
-            ColorOff[0] = R;
-            ColorOff[1] = G;
-            ColorOff[2] = B;
-        }
-    } else if (topic == MQTTprefix + "/Set/ColorNormal") {
-        int32_t R, G, B;
-        int n = sscanf(payload.c_str(), "%d,%d,%d", &R, &G, &B);
-
-        // R,G,B is between 0..255
-        if (n == 3 && (R >= 0 && R < 256) && (G >= 0 && G < 256) && (B >= 0 && B < 256)) {
-            ColorNormal[0] = R;
-            ColorNormal[1] = G;
-            ColorNormal[2] = B;
-        }
-    } else if (topic == MQTTprefix + "/Set/ColorSmart") {
-        int32_t R, G, B;
-        int n = sscanf(payload.c_str(), "%d,%d,%d", &R, &G, &B);
-
-        // R,G,B is between 0..255
-        if (n == 3 && (R >= 0 && R < 256) && (G >= 0 && G < 256) && (B >= 0 && B < 256)) {
-            ColorSmart[0] = R;
-            ColorSmart[1] = G;
-            ColorSmart[2] = B;
-        }
-    } else if (topic == MQTTprefix + "/Set/ColorSolar") {
-        int32_t R, G, B;
-        int n = sscanf(payload.c_str(), "%d,%d,%d", &R, &G, &B);
-
-        // R,G,B is between 0..255
-        if (n == 3 && (R >= 0 && R < 256) && (G >= 0 && G < 256) && (B >= 0 && B < 256)) {
-            ColorSolar[0] = R;
-            ColorSolar[1] = G;
-            ColorSolar[2] = B;
-        }
-    } else if (topic == MQTTprefix + "/Set/ColorCustom") {
-        int32_t R, G, B;
-        int n = sscanf(payload.c_str(), "%d,%d,%d", &R, &G, &B);
-
-        // R,G,B is between 0..255
-        if (n == 3 && (R >= 0 && R < 256) && (G >= 0 && G < 256) && (B >= 0 && B < 256)) {
-            ColorCustom[0] = R;
-            ColorCustom[1] = G;
-            ColorCustom[2] = B;
-        }
-    } else if (topic == MQTTprefix + "/Set/CableLock") {
-        if (payload == "1") {
-            CableLock = 1;
-        } else {
-            CableLock = 0;
-        }
-        write_settings();
-    } else if (topic == MQTTprefix + "/Set/EnableC2") {
-        // for backwards compatibility we accept both 0-4 as string argument:
-        //{ "Not present", "Always Off", "Solar Off", "Always On", "Auto" }
-        uint8_t value;
-        if (isdigit(payload[0])) {
-            value = payload.toInt();
-            if (value <=4) { //value is always >=0 because unsigned
-                EnableC2 = (EnableC2_t) value;
-            }
-        } else {
-            bool found=false;
-            for (value=0; value<5; value++)
-                if (payload == StrEnableC2[value]) {
-                    found = true;
-                    break;
-                }
-            if (found)
-                EnableC2 = (EnableC2_t) value;
-        }
-        write_settings();
-    }
-
-    // Make sure MQTT updates directly to prevent debounces
-    lastMqttUpdate = 10;
-}
-
-
 //print RFID in hex format
 void printRFID(char *buf) {
     if (RFID[0] == 0x01) {  // old reader 6 byte UID starts at RFID[1]
@@ -736,213 +524,6 @@ void printRFID(char *buf) {
         sprintf(buf, "%02X%02X%02X%02X%02X%02X%02X", RFID[0], RFID[1], RFID[2], RFID[3], RFID[4], RFID[5], RFID[6]);
     }
 }
-
-
-void SetupMQTTClient() {
-    // Set up subscriptions
-    MQTTclient.subscribe(MQTTprefix + "/Set/#",1);
-    MQTTclient.publish(MQTTprefix+"/connected", "online", true, 0);
-
-    //set the parameters for and announce sensors with device class 'current':
-    String optional_payload = MQTTclient.jsna("device_class","current") + MQTTclient.jsna("unit_of_measurement","A") + MQTTclient.jsna("value_template", R"({{ value | int / 10 }})");
-    MQTTclient.announce("Charge Current", "sensor", optional_payload);
-    MQTTclient.announce("Max Current", "sensor", optional_payload);
-    if (MainsMeter.Type) {
-        MQTTclient.announce("Mains Current L1", "sensor", optional_payload);
-        MQTTclient.announce("Mains Current L2", "sensor", optional_payload);
-        MQTTclient.announce("Mains Current L3", "sensor", optional_payload);
-    }
-    if (EVMeter.Type) {
-        MQTTclient.announce("EV Current L1", "sensor", optional_payload);
-        MQTTclient.announce("EV Current L2", "sensor", optional_payload);
-        MQTTclient.announce("EV Current L3", "sensor", optional_payload);
-    }
-    if (homeBatteryLastUpdate) {
-        MQTTclient.announce("Home Battery Current", "sensor", optional_payload);
-    }
-
-#if MODEM
-        //set the parameters for modem/SoC sensor entities:
-        optional_payload = MQTTclient.jsna("unit_of_measurement","%") + MQTTclient.jsna("value_template", R"({{ none if (value | int == -1) else (value | int) }})");
-        MQTTclient.announce("EV Initial SoC", "sensor", optional_payload);
-        MQTTclient.announce("EV Full SoC", "sensor", optional_payload);
-        MQTTclient.announce("EV Computed SoC", "sensor", optional_payload);
-        MQTTclient.announce("EV Remaining SoC", "sensor", optional_payload);
-
-        optional_payload = MQTTclient.jsna("device_class","duration") + MQTTclient.jsna("unit_of_measurement","m") + MQTTclient.jsna("value_template", R"({{ none if (value | int == -1) else (value | int / 60) | round }})");
-        MQTTclient.announce("EV Time Until Full", "sensor", optional_payload);
-
-        optional_payload = MQTTclient.jsna("device_class","energy") + MQTTclient.jsna("unit_of_measurement","Wh") + MQTTclient.jsna("value_template", R"({{ none if (value | int == -1) else (value | int) }})");
-        MQTTclient.announce("EV Energy Capacity", "sensor", optional_payload);
-        MQTTclient.announce("EV Energy Request", "sensor", optional_payload);
-
-        optional_payload = MQTTclient.jsna("value_template", R"({{ none if (value == '') else value }})");
-        MQTTclient.announce("EVCCID", "sensor", optional_payload);
-        optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/RequiredEVCCID")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/RequiredEVCCID"));
-        MQTTclient.announce("Required EVCCID", "text", optional_payload);
-#endif
-
-    optional_payload = MQTTclient.jsna("device_class","energy") + MQTTclient.jsna("unit_of_measurement","Wh") + MQTTclient.jsna("state_class","total_increasing");
-    if (MainsMeter.Type) {
-        MQTTclient.announce("Mains Import Active Energy", "sensor", optional_payload);
-        MQTTclient.announce("Mains Export Active Energy", "sensor", optional_payload);
-    }
-
-    if (EVMeter.Type) {
-        MQTTclient.announce("EV Import Active Energy", "sensor", optional_payload);
-        MQTTclient.announce("EV Export Active Energy", "sensor", optional_payload);
-        //set the parameters for and MQTTclient.announce other sensor entities:
-        optional_payload = MQTTclient.jsna("device_class","power") + MQTTclient.jsna("unit_of_measurement","W");
-        MQTTclient.announce("EV Charge Power", "sensor", optional_payload);
-        optional_payload = MQTTclient.jsna("device_class","energy") + MQTTclient.jsna("unit_of_measurement","Wh");
-        MQTTclient.announce("EV Energy Charged", "sensor", optional_payload);
-        optional_payload = MQTTclient.jsna("device_class","energy") + MQTTclient.jsna("unit_of_measurement","Wh") + MQTTclient.jsna("state_class","total_increasing");
-        MQTTclient.announce("EV Total Energy Charged", "sensor", optional_payload);
-    }
-
-    //set the parameters for and MQTTclient.announce sensor entities without device_class or unit_of_measurement:
-    optional_payload = "";
-    MQTTclient.announce("EV Plug State", "sensor", optional_payload);
-    MQTTclient.announce("Access", "sensor", optional_payload);
-    MQTTclient.announce("State", "sensor", optional_payload);
-    MQTTclient.announce("RFID", "sensor", optional_payload);
-    MQTTclient.announce("RFIDLastRead", "sensor", optional_payload);
-    MQTTclient.announce("NrOfPhases", "sensor", optional_payload);
-
-#if ENABLE_OCPP && defined(SMARTEVSE_VERSION) //run OCPP only on ESP32
-    MQTTclient.announce("OCPP", "sensor", optional_payload);
-    MQTTclient.announce("OCPPConnection", "sensor", optional_payload);
-#endif //ENABLE_OCPP
-
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/LEDColorOff")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/ColorOff"));
-    MQTTclient.announce("LED Color Off", "text", optional_payload);
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/LEDColorNormal")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/ColorNormal"));
-    MQTTclient.announce("LED Color Normal", "text", optional_payload);
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/LEDColorSmart")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/ColorSmart"));
-    MQTTclient.announce("LED Color Smart", "text", optional_payload);
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/LEDColorSolar")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/ColorSolar"));
-    MQTTclient.announce("LED Color Solar", "text", optional_payload);
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/LEDColorCustom")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/ColorCustom"));
-    MQTTclient.announce("LED Color Custom", "text", optional_payload);
-    
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/CustomButton")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/CustomButton"));
-    optional_payload += String(R"(, "options" : ["On", "Off"])");
-    MQTTclient.announce("Custom Button", "select", optional_payload);
-
-    optional_payload = MQTTclient.jsna("device_class","duration") + MQTTclient.jsna("unit_of_measurement","s");
-    MQTTclient.announce("SolarStopTimer", "sensor", optional_payload);
-    //set the parameters for and MQTTclient.announce diagnostic sensor entities:
-    optional_payload = MQTTclient.jsna("entity_category","diagnostic");
-    MQTTclient.announce("Error", "sensor", optional_payload);
-    MQTTclient.announce("WiFi SSID", "sensor", optional_payload);
-    MQTTclient.announce("WiFi BSSID", "sensor", optional_payload);
-    optional_payload = MQTTclient.jsna("entity_category","diagnostic") + MQTTclient.jsna("device_class","signal_strength") + MQTTclient.jsna("unit_of_measurement","dBm");
-    MQTTclient.announce("WiFi RSSI", "sensor", optional_payload);
-    optional_payload = MQTTclient.jsna("entity_category","diagnostic") + MQTTclient.jsna("device_class","temperature") + MQTTclient.jsna("unit_of_measurement","°C");
-    MQTTclient.announce("ESP Temp", "sensor", optional_payload);
-    optional_payload = MQTTclient.jsna("entity_category","diagnostic") + MQTTclient.jsna("device_class","duration") + MQTTclient.jsna("unit_of_measurement","s") + MQTTclient.jsna("entity_registry_enabled_default","False");
-    MQTTclient.announce("ESP Uptime", "sensor", optional_payload);
-
-#if MODEM
-        optional_payload = MQTTclient.jsna("unit_of_measurement","%") + MQTTclient.jsna("value_template", R"({{ (value | int / 1024 * 100) | round(0) }})");
-        MQTTclient.announce("CP PWM", "sensor", optional_payload);
-
-        optional_payload = MQTTclient.jsna("value_template", R"({{ none if (value | int == -1) else (value | int / 1024 * 100) | round }})");
-        optional_payload += MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/CPPWMOverride")) + MQTTclient.jsna("min", "-1") + MQTTclient.jsna("max", "100") + MQTTclient.jsna("mode","slider");
-        optional_payload += MQTTclient.jsna("command_template", R"({{ (value | int * 1024 / 100) | round }})");
-        MQTTclient.announce("CP PWM Override", "number", optional_payload);
-#endif
-    //set the parameters for and MQTTclient.announce select entities, overriding automatic state_topic:
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/Mode")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/Mode"));
-    optional_payload += String(R"(, "options" : ["Off", "Normal", "Smart", "Solar", "Pause"])");
-    MQTTclient.announce("Mode", "select", optional_payload);
-
-    optional_payload = MQTTclient.jsna("state_topic", String(MQTTprefix + "/EnableC2")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/EnableC2"));
-    optional_payload += String(R"(, "options" : ["Not present", "Always Off", "Solar Off", "Always On", "Auto"])");
-    MQTTclient.announce("EnableC2", "select", optional_payload);
-
-    //set the parameters for and MQTTclient.announce number entities:
-    optional_payload = MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/CurrentOverride")) + MQTTclient.jsna("min", "0") + MQTTclient.jsna("max", MaxCurrent ) + MQTTclient.jsna("mode","slider");
-    optional_payload += MQTTclient.jsna("value_template", R"({{ value | int / 10 if value | is_number else none }})") + MQTTclient.jsna("command_template", R"({{ value | int * 10 }})");
-    MQTTclient.announce("Charge Current Override", "number", optional_payload);
-
-    //set the parameters for and MQTTclient.announce Cable Lock:
-    optional_payload = MQTTclient.jsna("cablelock_topic", String(MQTTprefix + "/CableLock")) + MQTTclient.jsna("command_topic", String(MQTTprefix + "/Set/CableLock"));
-    optional_payload += String(R"(, "options" : ["0", "1"])");
-    MQTTclient.announce("Cable Lock", "select", optional_payload);
-}
-
-void mqttPublishData() {
-    lastMqttUpdate = 0;
-
-        if (MainsMeter.Type) {
-            MQTTclient.publish(MQTTprefix + "/MainsCurrentL1", MainsMeter.Irms[0], false, 0);
-            MQTTclient.publish(MQTTprefix + "/MainsCurrentL2", MainsMeter.Irms[1], false, 0);
-            MQTTclient.publish(MQTTprefix + "/MainsCurrentL3", MainsMeter.Irms[2], false, 0);
-            MQTTclient.publish(MQTTprefix + "/MainsImportActiveEnergy", MainsMeter.Import_active_energy, false, 0);
-            MQTTclient.publish(MQTTprefix + "/MainsExportActiveEnergy", MainsMeter.Export_active_energy, false, 0);
-        }
-        if (EVMeter.Type) {
-            MQTTclient.publish(MQTTprefix + "/EVCurrentL1", EVMeter.Irms[0], false, 0);
-            MQTTclient.publish(MQTTprefix + "/EVCurrentL2", EVMeter.Irms[1], false, 0);
-            MQTTclient.publish(MQTTprefix + "/EVCurrentL3", EVMeter.Irms[2], false, 0);
-            MQTTclient.publish(MQTTprefix + "/EVImportActiveEnergy", EVMeter.Import_active_energy, false, 0);
-            MQTTclient.publish(MQTTprefix + "/EVExportActiveEnergy", EVMeter.Export_active_energy, false, 0);
-        }
-        MQTTclient.publish(MQTTprefix + "/ESPTemp", TempEVSE, false, 0);
-        MQTTclient.publish(MQTTprefix + "/Mode", AccessStatus == OFF ? "Off" : AccessStatus == PAUSE ? "Pause" : Mode > 3 ? "N/A" : StrMode[Mode], true, 0);
-        MQTTclient.publish(MQTTprefix + "/MaxCurrent", MaxCurrent * 10, true, 0);
-        MQTTclient.publish(MQTTprefix + "/CustomButton", CustomButton ? "On" : "Off", false, 0);
-        MQTTclient.publish(MQTTprefix + "/ChargeCurrent", Balanced[0], true, 0);
-        MQTTclient.publish(MQTTprefix + "/ChargeCurrentOverride", OverrideCurrent, true, 0);
-        MQTTclient.publish(MQTTprefix + "/NrOfPhases", Nr_Of_Phases_Charging, true, 0);
-        MQTTclient.publish(MQTTprefix + "/Access", AccessStatus == OFF ? "Deny" : AccessStatus == ON ? "Allow" : AccessStatus == PAUSE ? "Pause" : "N/A", true, 0);
-        MQTTclient.publish(MQTTprefix + "/RFID", !RFIDReader ? "Not Installed" : RFIDstatus >= 8 ? "NOSTATUS" : StrRFIDStatusWeb[RFIDstatus], true, 0);
-        MQTTclient.publish(MQTTprefix + "/EnableC2", StrEnableC2[EnableC2], true, 0);
-        if (RFIDReader) {
-            char buf[15];
-            printRFID(buf);
-            MQTTclient.publish(MQTTprefix + "/RFIDLastRead", buf, true, 0);
-        }
-        MQTTclient.publish(MQTTprefix + "/State", getStateNameWeb(State), true, 0);
-        MQTTclient.publish(MQTTprefix + "/Error", getErrorNameWeb(ErrorFlags), true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVPlugState", (pilot != PILOT_12V) ? "Connected" : "Disconnected", true, 0);
-        MQTTclient.publish(MQTTprefix + "/WiFiSSID", String(WiFi.SSID()), true, 0);
-        MQTTclient.publish(MQTTprefix + "/WiFiBSSID", String(WiFi.BSSIDstr()), true, 0);
-#if MODEM
-        MQTTclient.publish(MQTTprefix + "/CPPWM", CurrentPWM, false, 0);
-        MQTTclient.publish(MQTTprefix + "/CPPWMOverride", CPDutyOverride ? String(CurrentPWM) : "-1", true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVInitialSoC", InitialSoC, true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVFullSoC", FullSoC, true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVComputedSoC", ComputedSoC, true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVRemainingSoC", RemainingSoC, true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVTimeUntilFull", TimeUntilFull, false, 0);
-        MQTTclient.publish(MQTTprefix + "/EVEnergyCapacity", EnergyCapacity, true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVEnergyRequest", EnergyRequest, true, 0);
-        MQTTclient.publish(MQTTprefix + "/EVCCID", EVCCID, true, 0);
-        MQTTclient.publish(MQTTprefix + "/RequiredEVCCID", RequiredEVCCID, true, 0);
-#endif
-        if (EVMeter.Type) {
-            MQTTclient.publish(MQTTprefix + "/EVChargePower", EVMeter.PowerMeasured, false, 0);
-            MQTTclient.publish(MQTTprefix + "/EVEnergyCharged", EVMeter.EnergyCharged, true, 0);
-            MQTTclient.publish(MQTTprefix + "/EVTotalEnergyCharged", EVMeter.Energy, false, 0);
-        }
-        if (homeBatteryLastUpdate)
-            MQTTclient.publish(MQTTprefix + "/HomeBatteryCurrent", homeBatteryCurrent, false, 0);
-#if ENABLE_OCPP && defined(SMARTEVSE_VERSION) //run OCPP only on ESP32
-        MQTTclient.publish(MQTTprefix + "/OCPP", OcppMode ? "Enabled" : "Disabled", true, 0);
-        MQTTclient.publish(MQTTprefix + "/OCPPConnection", (OcppWsClient && OcppWsClient->isConnected()) ? "Connected" : "Disconnected", false, 0);
-#endif //ENABLE_OCPP
-        MQTTclient.publish(MQTTprefix + "/LEDColorOff", String(ColorOff[0])+","+String(ColorOff[1])+","+String(ColorOff[2]), true, 0);
-        MQTTclient.publish(MQTTprefix + "/LEDColorNormal", String(ColorNormal[0])+","+String(ColorNormal[1])+","+String(ColorNormal[2]), true, 0);
-        MQTTclient.publish(MQTTprefix + "/LEDColorSmart", String(ColorSmart[0])+","+String(ColorSmart[1])+","+String(ColorSmart[2]), true, 0);
-        MQTTclient.publish(MQTTprefix + "/LEDColorSolar", String(ColorSolar[0])+","+String(ColorSolar[1])+","+String(ColorSolar[2]), true, 0);
-        MQTTclient.publish(MQTTprefix + "/LEDColorCustom", String(ColorCustom[0])+","+String(ColorCustom[1])+","+String(ColorCustom[2]), true, 0);
-        if (Lock != 0) {
-            MQTTclient.publish(MQTTprefix + "/CableLock", CableLock, true, 0);
-        }
-}
-#endif
 
 
 /**
@@ -1428,9 +1009,6 @@ bool handle_URI(struct mg_connection *c, struct mg_http_message *hm,  webServerR
         }
 #endif //ENABLE_OCPP
 
-        doc["home_battery"]["current"] = homeBatteryCurrent;
-        doc["home_battery"]["last_update"] = homeBatteryLastUpdate;
-
         doc["ev_meter"]["description"] = EMConfig[EVMeter.Type].Desc;
         doc["ev_meter"]["address"] = EVMeter.Address;
         doc["ev_meter"]["import_active_power"] = EVMeter.PowerMeasured; // Watt
@@ -1663,24 +1241,6 @@ bool handle_URI(struct mg_connection *c, struct mg_http_message *hm,  webServerR
             }
         }
 
-        //special section to post stuff for experimenting with an ISO15118 modem
-        if(request->hasParam("override_pwm")) {
-            int pwm = request->getParam("override_pwm")->value().toInt();
-            if (pwm == 0){
-                PILOT_DISCONNECTED;
-                CPDutyOverride = true;
-            } else if (pwm < 0){
-                PILOT_CONNECTED;
-                CPDutyOverride = false;
-                pwm = 100; // 10% until next loop, to be safe, corresponds to 6A
-            } else{
-                PILOT_CONNECTED;
-                CPDutyOverride = true;
-            }
-
-            SetCPDuty(pwm);
-            doc["override_pwm"] = pwm;
-        }
 #if MODEM
         //allow basic plug 'n charge based on evccid
         //if required_evccid is set to a value, SmartEVSE will only allow charging requests from said EVCCID
@@ -1896,88 +1456,6 @@ bool handle_URI(struct mg_connection *c, struct mg_http_message *hm,  webServerR
         serializeJson(doc, json);
         mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s\r\n", json.c_str());    // Yes. Respond JSON
         return true;
-    } else if (mg_http_match_uri(hm, "/currents") && !memcmp("POST", hm->method.buf, hm->method.len)) {
-        DynamicJsonDocument doc(200);
-
-        if(request->hasParam("battery_current")) {
-            if (LoadBl < 2) {
-                homeBatteryCurrent = request->getParam("battery_current")->value().toInt();
-                homeBatteryLastUpdate = time(NULL);
-                doc["battery_current"] = homeBatteryCurrent;
-            } else
-                doc["battery_current"] = "not allowed on slave";
-        }
-
-        if(MainsMeter.Type == EM_API) {
-            if(request->hasParam("L1") && request->hasParam("L2") && request->hasParam("L3")) {
-                if (LoadBl < 2) {
-#if SMARTEVSE_VERSION < 40 //v3
-                    MainsMeter.Irms[0] = request->getParam("L1")->value().toInt();
-                    MainsMeter.Irms[1] = request->getParam("L2")->value().toInt();
-                    MainsMeter.Irms[2] = request->getParam("L3")->value().toInt();
-
-                    CalcIsum();
-                    MainsMeter.setTimeout(COMM_TIMEOUT);
-#else  //v4
-                    Serial1.printf("@Irms:%03u,%d,%d,%d\n", MainsMeter.Address, (int16_t) request->getParam("L1")->value().toInt(), (int16_t) request->getParam("L2")->value().toInt(), (int16_t) request->getParam("L3")->value().toInt()); //Irms:011,312,123,124 means: the meter on address 11(dec) has Irms[0] 312 dA, Irms[1] of 123 dA, Irms[2] of 124 dA
-#endif
-                    for (int x = 0; x < 3; x++) {
-                        doc["original"]["L" + x] = IrmsOriginal[x];
-                        doc["L" + x] = MainsMeter.Irms[x];
-                    }
-                    doc["TOTAL"] = Isum;
-
-                } else
-                    doc["TOTAL"] = "not allowed on slave";
-            }
-        }
-
-        String json;
-        serializeJson(doc, json);
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s\r\n", json.c_str());    // Yes. Respond JSON
-        return true;
-    } else if (mg_http_match_uri(hm, "/ev_meter") && !memcmp("POST", hm->method.buf, hm->method.len)) {
-        DynamicJsonDocument doc(200);
-
-        if(EVMeter.Type == EM_API) {
-            if(request->hasParam("L1") && request->hasParam("L2") && request->hasParam("L3")) {
-#if SMARTEVSE_VERSION < 40 //v3
-                EVMeter.Irms[0] = request->getParam("L1")->value().toInt();
-                EVMeter.Irms[1] = request->getParam("L2")->value().toInt();
-                EVMeter.Irms[2] = request->getParam("L3")->value().toInt();
-                EVMeter.CalcImeasured();
-                EVMeter.Timeout = COMM_EVTIMEOUT;
-#else //v4
-                Serial1.printf("@Irms:%03u,%d,%d,%d\n", EVMeter.Address, (int16_t) request->getParam("L1")->value().toInt(), (int16_t) request->getParam("L2")->value().toInt(), (int16_t) request->getParam("L3")->value().toInt()); //Irms:011,312,123,124 means: the meter on address 11(dec) has Irms[0] 312 dA, Irms[1] of 123 dA, Irms[2] of 124 dA
-#endif
-                for (int x = 0; x < 3; x++)
-                    doc["ev_meter"]["currents"]["L" + x] = EVMeter.Irms[x];
-                doc["ev_meter"]["currents"]["TOTAL"] = EVMeter.Irms[0] + EVMeter.Irms[1] + EVMeter.Irms[2];
-            }
-
-            if(request->hasParam("import_active_energy") && request->hasParam("export_active_energy") && request->hasParam("import_active_power")) {
-
-                EVMeter.Import_active_energy = request->getParam("import_active_energy")->value().toInt();
-                EVMeter.Export_active_energy = request->getParam("export_active_energy")->value().toInt();
-#if SMARTEVSE_VERSION < 40 //v3
-                EVMeter.PowerMeasured = request->getParam("import_active_power")->value().toInt();
-#else //v4
-                Serial1.printf("@PowerMeasured:%03u,%d\n", EVMeter.Address, (int16_t) request->getParam("import_active_power")->value().toInt());
-#endif
-                EVMeter.UpdateEnergies(); //we dont send the energies to CH32 because they are not used there
-                doc["ev_meter"]["import_active_power"] = EVMeter.PowerMeasured;
-                doc["ev_meter"]["import_active_energy"] = EVMeter.Import_active_energy;
-                doc["ev_meter"]["export_active_energy"] = EVMeter.Export_active_energy;
-                doc["ev_meter"]["total_kwh"] = EVMeter.Energy;
-                doc["ev_meter"]["charged_kwh"] = EVMeter.EnergyCharged;
-            }
-        }
-
-        String json;
-        serializeJson(doc, json);
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s\r\n", json.c_str());    // Yes. Respond JSON
-        return true;
-
     } else if (mg_http_match_uri(hm, "/lcd")) {
         if (strncmp("POST", hm->method.buf, hm->method.len) == 0) {
             DynamicJsonDocument doc(100);
@@ -2083,59 +1561,8 @@ bool handle_URI(struct mg_connection *c, struct mg_http_message *hm,  webServerR
 
 #if MODEM && SMARTEVSE_VERSION < 40 
     } else if (mg_http_match_uri(hm, "/ev_state") && !memcmp("POST", hm->method.buf, hm->method.len)) {
-        DynamicJsonDocument doc(200);
-
-        //State of charge posting
-        int current_soc = request->getParam("current_soc")->value().toInt();
-        int full_soc = request->getParam("full_soc")->value().toInt();
-
-        // Energy requested by car
-        int energy_request = request->getParam("energy_request")->value().toInt();
-
-        // Total energy capacity of car's battery
-        int energy_capacity = request->getParam("energy_capacity")->value().toInt();
-
-        // Update EVCCID of car
-        if (request->hasParam("evccid")) {
-            if (request->getParam("evccid")->value().length() <= 32) {
-                strncpy(EVCCID, request->getParam("evccid")->value().c_str(), sizeof(EVCCID));
-                doc["evccid"] = EVCCID;
-            }
-        }
-
-        if (full_soc >= FullSoC) // Only update if we received it, since sometimes it's there, sometimes it's not
-            FullSoC = full_soc;
-
-        if (energy_capacity >= EnergyCapacity) // Only update if we received it, since sometimes it's there, sometimes it's not
-            EnergyCapacity = energy_capacity;
-
-        if (energy_request >= EnergyRequest) // Only update if we received it, since sometimes it's there, sometimes it's not
-            EnergyRequest = energy_request;
-
-        if (current_soc >= 0 && current_soc <= 100) {
-            // We set the InitialSoC for our own calculations
-            InitialSoC = current_soc;
-
-            // We also set the ComputedSoC to allow for app integrations
-            ComputedSoC = current_soc;
-
-            // Skip waiting, charge since we have what we've got
-            if (State == STATE_MODEM_REQUEST || State == STATE_MODEM_WAIT || State == STATE_MODEM_DONE){
-                _LOG_A("Received SoC via REST. Shortcut to State Modem Done\n");
-                setState(STATE_MODEM_DONE); // Go to State B, which means in this case setting PWM
-            }
-        }
-
-        RecomputeSoC();
-
-        doc["current_soc"] = current_soc;
-        doc["full_soc"] = full_soc;
-        doc["energy_capacity"] = energy_capacity;
-        doc["energy_request"] = energy_request;
-
-        String json;
-        serializeJson(doc, json);
-        mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s\r\n", json.c_str());    // Yes. Respond JSON
+        // Deprecated
+        mg_http_reply(c, 404, "", "");
         return true;
 #endif
 #if MODEM && SMARTEVSE_VERSION >= 40
@@ -2995,6 +2422,10 @@ extern void Timer20ms(void * parameter);
     // Set eModbus LogLevel to 1, to suppress possible E5 errors
     MBUlogLvl = LOG_LEVEL_CRITICAL;
     ConfigureModbusMode(255);
+    // Start Modbus TCP Server
+    MBserverTCP.start(502, 4, 20000);
+    MBserverTCP.registerWorker(1, ANY_FUNCTION_CODE, &MBNodeRequestTCP);
+    MBserverTCP.registerWorker(0, ANY_FUNCTION_CODE, &MBNodeRequestTCP); // Also listen to Broadcast, although usually not used in TCP
     PILOT_CONNECTED;           // CP signal ACTIVE
 #endif
 

@@ -248,8 +248,7 @@ extern volatile uint16_t ADC_CP[NUM_ADC_SAMPLES];
 int phasesLastUpdate = 0;
 bool phasesLastUpdateFlag = false;
 int16_t IrmsOriginal[3]={0, 0, 0};
-int16_t homeBatteryCurrent = 0;
-int homeBatteryLastUpdate = 0; // Time in milliseconds
+// Home Battery removed
 // set by EXTERNAL logic through MQTT/REST to indicate cheap tariffs ahead until unix time indicated
 uint8_t ColorOff[3] = {0, 0, 0};          // off
 uint8_t ColorNormal[3] = {0, 255, 0};   // Green
@@ -1191,7 +1190,7 @@ void CalcBalancedCurrent(char mod) {
             TotalCurrent += Balanced[n];                                        // Calculate total of all set charge currents
     }
 
-    _LOG_V("Checkpoint 1 Isetbalanced=%d.%d A Imeasured=%d.%d A MaxCircuit=%d Imeasured_EV=%d.%d A, Battery Current = %d.%d A, mode=%u.\n", IsetBalanced/10, abs(IsetBalanced%10), MainsMeter.Imeasured/10, abs(MainsMeter.Imeasured%10), MaxCircuit, EVMeter.Imeasured/10, abs(EVMeter.Imeasured%10), homeBatteryCurrent/10, abs(homeBatteryCurrent%10), Mode);
+    _LOG_V("Checkpoint 1 Isetbalanced=%d.%d A Imeasured=%d.%d A MaxCircuit=%d Imeasured_EV=%d.%d A, mode=%u.\n", IsetBalanced/10, abs(IsetBalanced%10), MainsMeter.Imeasured/10, abs(MainsMeter.Imeasured%10), MaxCircuit, EVMeter.Imeasured/10, abs(EVMeter.Imeasured%10), Mode);
 
     Baseload_EV = EVMeter.Imeasured - TotalCurrent;                             // Calculate Baseload (load without any active EVSE)
     if (Baseload_EV < 0)
@@ -2383,7 +2382,7 @@ void CheckSerialComm(void) {
     SET_ON_RECEIVE(ConfigChanged:, ConfigChanged)
 
     SET_ON_RECEIVE(ModemStage:, ModemStage)
-    SET_ON_RECEIVE(homeBatteryCurrent:, homeBatteryCurrent); if (ret) homeBatteryLastUpdate=time(NULL);
+    // SET_ON_RECEIVE(homeBatteryCurrent:, homeBatteryCurrent); if (ret) homeBatteryLastUpdate=time(NULL);
 
     //these variables are owned by CH32 and copies are sent to ESP32:
     SET_ON_RECEIVE(SolarStopTimer:, SolarStopTimer)
@@ -3579,28 +3578,9 @@ uint16_t getItemValue(uint8_t nav) {
     }
 }
 
-/**
- * Returns the known battery charge rate if the data is not too old.
- * Returns 0 if data is too old.
- * A positive number means charging, a negative number means discharging --> this means the inverse must be used for calculations
- * 
- * Example:
- * homeBatteryCharge == 1000 --> Battery is charging using Solar
- * P1 = -500 --> Solar injection to the net but nut sufficient for charging
- * 
- * If the P1 value is added with the inverse battery charge it will inform the EVSE logic there is enough Solar --> -500 + -1000 = -1500
- * 
- * Note: The user who is posting battery charge data should take this into account, meaning: if he wants a minimum home battery (dis)charge rate he should substract this from the value he is sending.
- */
-// 
+// Home Battery removed
 int16_t getBatteryCurrent(void) {
-    if (Mode == MODE_SOLAR && ((uint32_t)homeBatteryLastUpdate > (millis()-60000))) {
-        return homeBatteryCurrent;
-    } else {
-        homeBatteryCurrent = 0;
-        homeBatteryLastUpdate = 0;
-        return 0;
-    }
+    return 0;
 }
 
 

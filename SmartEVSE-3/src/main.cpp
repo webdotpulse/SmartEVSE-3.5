@@ -5,11 +5,6 @@
  * #ifndef SMARTEVSE_VERSION   //CH32 code
  */
 
-//prevent MQTT compiling on CH32
-#if defined(MQTT) && !defined(ESP32)
-#error "MQTT requires ESP32 to be defined!"
-#endif
-
 #include "main.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -135,7 +130,6 @@ uint16_t GridRelayMaxSumMains = GRID_RELAY_MAX_SUMMAINS;                    // M
                                                                             // The relay is only allowed on the Master
 bool GridRelayOpen = false;                                                 // The read status of the relay
 bool CustomButton = false;                                                  // The status of the custom button
-bool MqttButtonState = false;                                               // The status of the button send via MQTT
 uint16_t MaxCurrent = MAX_CURRENT;                                          // Max Charge current (A)
 uint16_t MinCurrent = MIN_CURRENT;                                          // Minimal current the EV is happy with (A)
 uint8_t Mode = MODE;                                                        // EVSE mode (0:Normal / 1:Smart / 2:Solar)
@@ -266,6 +260,10 @@ uint16_t firmwareUpdateTimer = 0;                                               
                                                                                 //                                              whether an update is necessary
 #if ENABLE_OCPP && defined(SMARTEVSE_VERSION) //run OCPP only on ESP32
 uint8_t OcppMode = OCPP_MODE; //OCPP Client mode. 0:Disable / 1:Enable
+String OcppBackendUrl = "";
+String OcppChargeBoxId = "";
+String OcppAuthKey = "";
+String OcppAutoAuthIdTag = "";
 
 unsigned char OcppRfidUuid [7];
 size_t OcppRfidUuidLen;
@@ -309,7 +307,6 @@ extern void requestNodeStatus(uint8_t NodeNr);
 extern uint8_t processAllNodeStates(uint8_t NodeNr);
 extern void BroadcastCurrent(void);
 extern void CheckRFID(void);
-extern void mqttPublishData();
 extern void DisconnectEvent(void);
 extern char EVCCID[32];
 extern char RequiredEVCCID[32];
@@ -378,32 +375,25 @@ void Button::HandleSwitch(void)
             case 1: // Access Button
                 setAccess(AccessStatus == ON ? OFF : ON);           // Toggle AccessStatus OFF->ON->OFF (old behaviour) or PAUSE->ON
                 _LOG_I("Access: %d\n", AccessStatus);
-                MqttButtonState = !MqttButtonState;
                 break;
             case 2: // Access Switch
                 setAccess(ON);
-                MqttButtonState = true;
                 break;
             case 3: // Smart-Solar Button
-                MqttButtonState = true;
                 break;
             case 4: // Smart-Solar Switch
                 if (Mode == MODE_SOLAR) {
                     setMode(MODE_SMART);
                 }
-                MqttButtonState = true;
                 break;
             case 5: // Grid relay
                 GridRelayOpen = false;
-                MqttButtonState = true;
                 break;
             case 6: // Custom button B
                 CustomButton = !CustomButton;
-                MqttButtonState = CustomButton;
                 break;
             case 7: // Custom button S
                 CustomButton = true;
-                MqttButtonState = CustomButton;
                 break;
             default:
                 if (State == STATE_C) {                             // Menu option Access is set to Disabled
@@ -413,9 +403,6 @@ void Button::HandleSwitch(void)
                 }
                 break;
         }
-        #if MQTT
-                MQTTclient.publish(MQTTprefix + "/CustomButton", MqttButtonState ? "On" : "Off", false, 0);
-        #endif  
 
         // Reset RCM error when switch is pressed/toggled
         // RCM was tripped, but RCM level is back to normal
@@ -432,7 +419,6 @@ void Button::HandleSwitch(void)
         switch (Switch) {
             case 2: // Access Switch
                 setAccess(OFF);
-                MqttButtonState = false;
                 break;
             case 3: // Smart-Solar Button
                 if (tmpMillis < TimeOfPress + 1500) {                            // short press
@@ -447,29 +433,21 @@ void Button::HandleSwitch(void)
                     MaxSumMainsTimer = 0;
                     LCDTimer = 0;
                 }
-                MqttButtonState = false;
                 break;
             case 4: // Smart-Solar Switch
                 if (Mode == MODE_SMART) setMode(MODE_SOLAR);
-                MqttButtonState = false;
                 break;
             case 5: // Grid relay
                 GridRelayOpen = true;
-                MqttButtonState = false;
                 break;
             case 6: // Custom button B
                 break;
             case 7: // Custom button S
                 CustomButton = false;
-                MqttButtonState = CustomButton;
                 break;
             default:
                 break;
         }
-        #if MQTT
-                MQTTclient.publish(MQTTprefix + "/CustomButton", MqttButtonState ? "On" : "Off", false, 0);
-                MQTTclient.publish(MQTTprefix + "/CustomButtonPressTime", (tmpMillis - TimeOfPress), false, 0);
-        #endif
     }
 }
 #endif
@@ -524,10 +502,6 @@ void setOverrideCurrent(uint16_t Current) { //c
     SEND_TO_CH32(OverrideCurrent)
 
     //write_settings TODO doesnt include OverrideCurrent
-#if MQTT
-    // Update MQTT faster
-    lastMqttUpdate = 10;
-#endif //MQTT
 #else //CH32
     SEND_TO_ESP32(OverrideCurrent)
 #endif //SMARTEVSE_VERSION
@@ -625,11 +599,6 @@ void setMode(uint8_t NewMode) {
     // Also check all other switching options
     CheckSwitchingPhases();
 
-#if MQTT
-    // Update MQTT faster
-    lastMqttUpdate = 10;
-#endif
-
     if (NewMode == MODE_SMART) {                                                // the smart-solar button used to clear all those flags toggling between those modes
         clearErrorFlags(LESS_6A);                                               // Clear All errors
         setSolarStopTimer(0);                                                   // Also make sure the SolarTimer is disabled.
@@ -668,9 +637,6 @@ void setSolarStopTimer(uint16_t Timer) {
     SolarStopTimer = Timer;
     SEND_TO_ESP32(SolarStopTimer);
     SEND_TO_CH32(SolarStopTimer);
-#if MQTT
-    MQTTclient.publish(MQTTprefix + "/SolarStopTimer", SolarStopTimer, false, 0);
-#endif
 }
 
 #if !defined(SMARTEVSE_VERSION) || SMARTEVSE_VERSION >=30 && SMARTEVSE_VERSION < 40   //CH32 and v3 ESP32
@@ -930,11 +896,6 @@ void setState(uint8_t NewState) { //c
     BalancedState[0] = NewState;
     State = NewState;
 
-#if MQTT
-    // Update MQTT faster
-    lastMqttUpdate = 10;
-#endif
-
 #ifdef SMARTEVSE_VERSION //v3
     BacklightTimer = BACKLIGHT;                                                 // Backlight ON
 #else //CH32
@@ -987,10 +948,6 @@ void setAccess(AccessStatus_t Access) { //c
         preferences.end();
     }
 
-#if MQTT
-    // Update MQTT faster
-    lastMqttUpdate = 10;
-#endif //MQTT
 #else //CH32
     SEND_TO_ESP32(Access) //a
 #endif //SMARTEVSE_VERSION
@@ -1675,9 +1632,6 @@ printf("@MSG: DINGO State=%d, pilot=%d, AccessTimer=%d, PilotDisconnected=%d.\n"
     if (SolarStopTimer) {
         SolarStopTimer--;
         SEND_TO_ESP32(SolarStopTimer)
-#if MQTT
-        MQTTclient.publish(MQTTprefix + "/SolarStopTimer", SolarStopTimer, false, 0);
-#endif
         if (SolarStopTimer == 0) {
             if (State == STATE_C) setState(STATE_C1);                   // tell EV to stop charging
             setErrorFlags(LESS_6A);                                     // Set error: not enough sun
@@ -1793,14 +1747,6 @@ printf("@MSG: DINGO State=%d, pilot=%d, AccessTimer=%d, PilotDisconnected=%d.\n"
 
     //_LOG_A("Timer1S task free ram: %u\n", uxTaskGetStackHighWaterMark( NULL ));
 
-
-#if MQTT
-    if (lastMqttUpdate++ >= 10) {
-        // Publish latest data, every 10 seconds
-        // We will try to publish data faster if something has changed
-        mqttPublishData();
-    }
-#endif
 
 #ifndef SMARTEVSE_VERSION //CH32
     if (ErrorFlags & RCM_TEST) {

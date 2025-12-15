@@ -126,6 +126,10 @@ extern uint16_t SolarStopTimer;
 extern uint16_t MaxSumMainsTimer;
 extern uint8_t RFIDstatus;
 extern uint8_t OcppMode;
+extern String OcppBackendUrl;
+extern String OcppChargeBoxId;
+extern String OcppAuthKey;
+extern String OcppAutoAuthIdTag;
 extern bool LocalTimeSet;
 extern uint32_t serialnr;
 

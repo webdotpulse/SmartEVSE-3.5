@@ -51,20 +51,10 @@
       let endpoint = document.location + 'settings';
       // let endpoint = 'http://10.0.0.36/settings';
       let initiated=false;
-      let mqttEditMode = false;
       let ocppEditMode = false;
       let last_evse_state_id=0;
 
       $(document).ready(loadData());
-
-      // Function to toggle cert visibility
-      function toggleCertVisibility() {
-          if ($('#mqtt_tls').is(':checked')) {
-              $('#mqtt_ca_cert_wrapper').show();
-          } else {
-              $('#mqtt_ca_cert_wrapper').hide();
-          }
-      }
 
       /**
        * Helper function to query the DOM for a single element.
@@ -139,15 +129,6 @@
               $('#full_at')
                 .text(time_until_full > 0 ? new Date(+Date.now()+(time_until_full * 1000)).toLocaleString(undefined, { timeStyle: 'short', dateStyle: "short" }) : 'N/A')
                 .attr('title', (time_until_full > 0 ? Math.round(time_until_full / 60) + ' min to go' : 'N/A'));
-            }
-
-            if (data.mqtt) {
-              $('#mqtt').text((data.mqtt.status) || 'N/A').show();
-              $('#mqtt_config').show();
-            } else {
-              $('#mqtt').text('').hide();
-              $('.config').hide();
-              $('#mqtt_config').hide();
             }
 
             if(data.evse.loadbl > 1) {
@@ -301,17 +282,6 @@
               $('.with_modem').hide();
             }
 
-            if (data.mqtt && !mqttEditMode) {
-                $('#mqtt_host').val(data.mqtt.host);
-                $('#mqtt_port').val(data.mqtt.port);
-                $('#mqtt_username').val(data.mqtt.username);
-                $('#mqtt_password').val(data.mqtt.password);
-                $('#mqtt_topic_prefix').val(data.mqtt.topic_prefix);
-                $('#mqtt_tls').prop('checked', data.mqtt.tls).checkboxradio("refresh");  // Set and refresh widget
-                $('#mqtt_ca_cert').val(data.mqtt.ca_cert || '');
-                toggleCertVisibility();
-            }
-
             if (data.settings.lcdlock == 1) {
               document.getElementById("lcdlock").checked = true;
               document.getElementById("lcdlock_label").classList.remove("ui-checkbox-off")
@@ -379,8 +349,6 @@
           });
       }
 
-      // Add event listener for TLS checkbox
-      $(document).on('change', '#mqtt_tls', toggleCertVisibility);
   </script>
 
 
@@ -486,14 +454,6 @@
                                               <div class="h5 mb-0 mr-3 text-gray-800" id="temp"></div>
                                             </div>
                                         </div>
-                                        <div class="row no-gutters align-items-center">
-                                          <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 140px;">
-                                              MQTT:
-                                          </div>
-                                          <div class="col">
-                                              <div class="h5 mb-0 mr-3 text-gray-800" id="mqtt"></div>
-                                          </div>
-                                      </div>
                                         <div class="row no-gutters align-items-center" id="contactor2">
                                           <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 140px;">
                                               Contactor 2:
@@ -1098,43 +1058,10 @@
                         // Backend sync will correct the state in case of failure.
                         $qs('#mode').textContent = $qs(`#mode_${mode}`).textContent;
                         for (let x of [0, 1, 2, 3, 4]) {
-                            $qs(`#mode_${x}`).classList.toggle('ui-btn-active', x === mode);
+                            $qs(`#mode_${x}`).classList.toggle('ui-btn-active', x === data.mode_id);
                         }
                     }
 
-                    function toggleMqttEdit() {
-                        mqttEditMode = !mqttEditMode;
-                        $('.mqtt_settings').toggle();
-                        if (mqttEditMode) {
-                            $('#edit_mqtt_button').text("Close Settings")
-                            $.get("/mqtt_ca_cert", function(certData) {
-                                $('#mqtt_ca_cert').val(certData);
-                            });
-                        } else {
-                            $('#edit_mqtt_button').text("Edit Settings")
-                        }
-                    }
-                    function configureMqtt() {
-                        var params = {
-                            mqtt_update:       1,
-                            mqtt_host:         $('#mqtt_host').val(),
-                            mqtt_port:         $('#mqtt_port').val(),
-                            mqtt_username:     $('#mqtt_username').val(),
-                            mqtt_password:     $('#mqtt_password').val(),
-                            mqtt_topic_prefix: $('#mqtt_topic_prefix').val(),
-                            mqtt_tls:          $('#mqtt_tls').is(':checked') ? 1 : 0,
-                            mqtt_ca_cert:      $('#mqtt_ca_cert').val()
-                        };
-                        // Build query string with proper encoding
-                        var query = Object.keys(params)
-                            .map(k => k + "=" + encodeURIComponent(params[k]))
-                            .join("&");
-
-                        $.post("/settings?" + query);
-                        alert('Settings applied');
-                        toggleMqttEdit();
-                        event.preventDefault();
-                    }
                     function toggleLCDlock() {
                       var LCDlockCheckbox = document.getElementById("lcdlock");
                       $.post( "/settings?lcdlock=" + (LCDlockCheckbox.checked == true ? 1 : 0));
@@ -1376,37 +1303,7 @@
                             </div>
                         </div>
                     </div>
-                  <div style="margin-bottom: 20px;" class="config">
-                      <div class="card border-left-primary shadow h-100 py-2">
-                        <div class="card-body">
-                            <div class="row no-gutters align-items-center">
-                                <div class="col mr-2">
-                                    <div class="text font-weight-bold text-primary text-uppercase mb-1">Config</div>
-                                    <div class="row no-gutters align-items-center" id="mqtt_config">
-                                        <div class="col-auto h5 mb-0 mr-3 font-weight-bold text-gray-800" style="width: 120px;">
-                                            MQTT:
-                                        </div>
-                                        <div class="col">
-                                            <button onclick="toggleMqttEdit()" style="display:inline-block;" id="edit_mqtt_button">Edit Settings</button>
-                                            <div class="mqtt_settings" style="display:none">
-                                                <label>Host: <input id="mqtt_host" title="Leave empty to disable MQTT"></label>
-                                                <label>Port: <input id="mqtt_port" title="Usually 1883 for MQTT, and 8883 for secure MQTTS"></label>
-                                                <label>Username: <input id="mqtt_username" title="Leave empty for anonymous MQTT"></label>
-                                                <label>Password: <input id="mqtt_password" title="Leave empty for anonymous MQTT"></label>
-                                                <label>Topic Prefix: <input id="mqtt_topic_prefix"></label>
-                                                <label>Enable TLS: <input type="checkbox" id="mqtt_tls" value="1"></label>
-                                                <div id="mqtt_ca_cert_wrapper" style="display:none;">
-                                                    <label>CA Certificate (PEM): <textarea id="mqtt_ca_cert" rows="10" style="width:100%; font-family:monospace;" title="Paste the PEM-formatted CA certificate here for TLS."></textarea></label>
-                                                </div>
-                                                <button onclick="configureMqtt()" style="display:inline-block;">Save</button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                  </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+
                     <div id="ocpp_config_outer" style="margin-bottom: 20px;" class="config">
                       <div class="card border-left-primary shadow h-100 py-2">
                         <div class="card-body">

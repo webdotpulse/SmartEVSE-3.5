@@ -1013,6 +1013,7 @@ static void fn_http_server(struct mg_connection *c, int ev, void *ev_data) {
         } else {                                                                    // if everything else fails, serve static page
             // Cache ".webp" or ".ico" image files for one year without revalidation or server checks.
             if (mg_match(hm->uri, mg_str("#.webp"), NULL) ||
+                mg_match(hm->uri, mg_str("#.avif"), NULL) ||
                 mg_match(hm->uri, mg_str("#.ico"), NULL)) {
                 struct mg_http_serve_opts opts = {
                     .root_dir = "/data", .ssi_pattern = NULL,
